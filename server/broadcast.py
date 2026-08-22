@@ -4,7 +4,10 @@ import asyncio
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
+from aiohttp.web_ws import WebSocketResponse
+
 from json_utils import json_dumps
+from websocket_utils import ws_send_str_many
 
 if TYPE_CHECKING:
     from bug.game_bug import GameBug
@@ -53,10 +56,21 @@ async def round_broadcast(
         )
         return
 
-    for spectator in spectators:
-        await spectator.send_game_message_str(game.id, payload)
-    for player in players:
-        await player.send_game_message_str(game.id, payload)
+    # Collect all WebSocket objects from spectators and players into one flat
+    # list and call ws_send_str_many once.  The previous code awaited each
+    # user's send_game_message_str() in a sequential loop, adding a context
+    # switch per user even though the payload was identical.  A single
+    # asyncio.gather call inside ws_send_str_many is strictly faster.
+    game_id = game.id
+    all_ws: list[WebSocketResponse] = []
+    for user in (*spectators, *players):
+        ws_set = user.game_sockets.get(game_id)
+        if ws_set:
+            all_ws.extend(ws_set)
+
+    if all_ws:
+        await ws_send_str_many(all_ws, payload)
+
     for queue in ch:
         try:
             queue.put_nowait(payload)
